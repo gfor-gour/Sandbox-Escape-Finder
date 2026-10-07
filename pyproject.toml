@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sandbox-escape-finder"
+version = "0.1.0"
+description = "Static and dynamic escape finder for the RestrictedPython sandbox"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "SandboxEscapeFinder Team" }
+]
+dependencies = [
+    "RestrictedPython==8.5",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
