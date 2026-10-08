@@ -1,59 +1,179 @@
-"""AST-based static analysis engine for sandbox escape pattern detection.
-
-This module inspects Python source code using standard library Abstract Syntax
-Trees (`ast`) to flag patterns characteristic of known sandbox escape techniques
-(e.g., dunder attribute traversal, builtins recovery, frame inspection).
-The static analyzer is decoupled from execution and never runs code.
-"""
+"""AST-based static analyzer for detecting sandbox escape constructs."""
 
 from __future__ import annotations
 
 import ast
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Callable, Literal
+
+from sandbox_escape_finder.config import CANONICAL_TECHNIQUES, SandboxConfig, load_config
 
 
 @dataclass(frozen=True)
 class Finding:
-    """Represents a suspicious pattern detected by the static analyzer.
+    """A suspicious AST pattern detected by a static rule.
 
     Attributes:
-        technique: Identifier of the detected escape technique category
-            (e.g., "subclass_traversal", "builtins_access").
-        description: Readable explanation of why this AST pattern is suspicious.
-        lineno: 1-indexed line number in the source code where pattern was found.
-        col_offset: 0-indexed column offset in the source code.
-        node_type: AST node class name that triggered the detection (e.g. "Attribute").
-        confidence: Level of certainty for this finding ("HIGH", "MEDIUM", "LOW").
+        technique: Identifier of the escape technique (e.g., 'subclasses_traversal').
+        reason: Plain-text explanation of why this node is suspicious.
+        node_location: (line, col) tuple corresponding to the source coordinates.
+        confidence: Certainty level ('HIGH', 'MEDIUM', 'LOW').
+        node_type: AST node class name (e.g. 'Attribute', 'Call').
     """
 
     technique: str
-    description: str
-    lineno: int
-    col_offset: int
-    node_type: str
-    confidence: Literal["HIGH", "MEDIUM", "LOW"]
+    reason: str
+    node_location: tuple[int, int]
+    confidence: Literal["HIGH", "MEDIUM", "LOW"] = "HIGH"
+    node_type: str = "Attribute"
+
+    def __init__(
+        self,
+        technique: str,
+        reason: str | None = None,
+        node_location: tuple[int, int] | None = None,
+        confidence: Literal["HIGH", "MEDIUM", "LOW"] = "HIGH",
+        node_type: str = "Attribute",
+        description: str | None = None,
+        lineno: int | None = None,
+        col_offset: int | None = None,
+    ) -> None:
+        resolved_reason = reason if reason is not None else (description or "")
+        resolved_loc = (
+            node_location
+            if node_location is not None
+            else (lineno if lineno is not None else 1, col_offset if col_offset is not None else 0)
+        )
+        object.__setattr__(self, "technique", technique)
+        object.__setattr__(self, "reason", resolved_reason)
+        object.__setattr__(self, "node_location", resolved_loc)
+        object.__setattr__(self, "confidence", confidence)
+        object.__setattr__(self, "node_type", node_type)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert finding into the standard dictionary format."""
+        return {
+            "technique": self.technique,
+            "node_location": self.node_location,
+            "confidence": self.confidence,
+            "reason": self.reason,
+        }
+
+
+def detect_subclasses_traversal(tree: ast.AST) -> list[Finding]:
+    """Flag attempts to reach object hierarchy via __subclasses__ attribute or call."""
+    findings: list[Finding] = []
+
+    for node in ast.walk(tree):
+        lineno = getattr(node, "lineno", 1)
+        col_offset = getattr(node, "col_offset", 0)
+
+        if isinstance(node, ast.Attribute) and node.attr == "__subclasses__":
+            findings.append(
+                Finding(
+                    technique="subclasses_traversal",
+                    reason="Direct attribute access to '__subclasses__' to traverse runtime class hierarchy.",
+                    node_location=(lineno, col_offset),
+                    confidence="HIGH",
+                    node_type="Attribute",
+                )
+            )
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value == "__subclasses__"
+        ):
+            findings.append(
+                Finding(
+                    technique="subclasses_traversal",
+                    reason="Dynamic getattr() lookup targeting '__subclasses__'.",
+                    node_location=(lineno, col_offset),
+                    confidence="HIGH",
+                    node_type="Call",
+                )
+            )
+
+    return findings
+
+
+def detect_globals_access(tree: ast.AST) -> list[Finding]:
+    """Flag attempts to escape local function scope via __globals__ or __closure__."""
+    findings: list[Finding] = []
+    target_attrs = {"__globals__", "__closure__", "func_globals", "func_closure"}
+
+    for node in ast.walk(tree):
+        lineno = getattr(node, "lineno", 1)
+        col_offset = getattr(node, "col_offset", 0)
+
+        if isinstance(node, ast.Attribute) and node.attr in target_attrs:
+            findings.append(
+                Finding(
+                    technique="globals_access",
+                    reason=f"Direct access to '{node.attr}' to inspect module globals or closure cells.",
+                    node_location=(lineno, col_offset),
+                    confidence="HIGH",
+                    node_type="Attribute",
+                )
+            )
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[1], ast.Constant)
+            and node.args[1].value in target_attrs
+        ):
+            findings.append(
+                Finding(
+                    technique="globals_access",
+                    reason=f"Dynamic getattr() lookup targeting '{node.args[1].value}'.",
+                    node_location=(lineno, col_offset),
+                    confidence="HIGH",
+                    node_type="Call",
+                )
+            )
+
+    return findings
+
+
+DETECTOR_REGISTRY: dict[str, Callable[[ast.AST], list[Finding]]] = {
+    "subclasses_traversal": detect_subclasses_traversal,
+    "globals_access": detect_globals_access,
+}
 
 
 class StaticAnalyzer:
-    """Static AST analyzer that identifies known sandbox escape vectors in source code.
+    """Scans Python source trees using AST visitor rules."""
 
-    Operates purely on syntax trees without executing untrusted code.
-    """
+    def __init__(self, config: SandboxConfig | dict[str, Any] | None = None) -> None:
+        self.config: SandboxConfig = load_config(config)
+        self._enabled_detectors: list[str] = [
+            tech for tech in self.config.enabled_techniques if tech in DETECTOR_REGISTRY
+        ]
 
-    def __init__(self) -> None:
-        """Initialize the static analyzer and its AST visitor rules."""
-        ...
+    @property
+    def enabled_techniques(self) -> list[str]:
+        return list(self._enabled_detectors)
 
-    def scan(self, source_code: str) -> list[Finding]:
-        """Parse Python source code into an AST and identify escape indicators.
+    def scan_findings(self, source_code: str) -> list[Finding]:
+        """Scan source code and return typed Finding objects."""
+        try:
+            tree = ast.parse(source_code)
+        except SyntaxError:
+            return []
 
-        Args:
-            source_code: Raw Python code string to analyze.
+        findings: list[Finding] = []
+        for tech in self._enabled_detectors:
+            detector = DETECTOR_REGISTRY.get(tech)
+            if detector:
+                findings.extend(detector(tree))
 
-        Returns:
-            list[Finding]: A list of detected findings with technique classifications,
-                AST locations, and confidence levels. Empty list if no suspicious
-                constructs are found or if parsing fails.
-        """
-        raise NotImplementedError("Stub only: AST static analysis logic will be implemented in subsequent steps.")
+        findings.sort(key=lambda f: f.node_location)
+        return findings
+
+    def scan(self, source_code: str) -> list[dict[str, Any]]:
+        """Scan source code and return a list of finding dictionaries."""
+        return [f.to_dict() for f in self.scan_findings(source_code)]
