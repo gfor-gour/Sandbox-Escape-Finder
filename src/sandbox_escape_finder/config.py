@@ -45,6 +45,8 @@ class SandboxConfig:
     def from_dict(cls, data: dict[str, Any]) -> SandboxConfig:
         """Instantiate SandboxConfig from a dictionary, coercing types as needed."""
         cfg = dict(data)
+        if "seed" in cfg and "random_seed" not in cfg:
+            cfg["random_seed"] = cfg["seed"]
         if "temp_dir" in cfg and cfg["temp_dir"] is not None and not isinstance(cfg["temp_dir"], Path):
             cfg["temp_dir"] = Path(cfg["temp_dir"])
         if "enabled_techniques" in cfg:

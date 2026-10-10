@@ -1,11 +1,14 @@
-"""Unit tests for sandbox_exec subprocess execution and safety controls."""
+"""Unit tests for sandbox_exec subprocess execution, DynamicProber, and payload corpus."""
 
 from __future__ import annotations
+
+from typing import Any
 
 import pytest
 
 from sandbox_escape_finder.config import SandboxConfig
-from sandbox_escape_finder.dynamic_prober import DynamicProber, sandbox_exec
+from sandbox_escape_finder.dynamic_prober import DynamicProber, Payload, sandbox_exec
+from sandbox_escape_finder.payloads import PAYLOADS, get_payload_corpus
 
 
 class TestSandboxExec:
@@ -76,3 +79,106 @@ print(f"total: {total}")
         assert result["exception"] is not None
         assert "SystemExit" in result["exception"]
         assert result["timed_out"] is False
+
+
+class TestDynamicProberCorpus:
+    """Tests running the payload corpus through DynamicProber."""
+
+    def test_payload_corpus_minimum_size_and_schema(self) -> None:
+        """Verify the corpus contains at least 10 payloads with required schema."""
+        corpus = get_payload_corpus()
+        assert len(corpus) >= 10
+        for p in corpus:
+            assert isinstance(p["code"], str) and len(p["code"]) > 0
+            assert isinstance(p["technique"], str) and len(p["technique"]) > 0
+            assert isinstance(p["source"], str) and len(p["source"]) > 0
+
+    def test_real_corpus_run_shape_and_keys(self) -> None:
+        """Run the real corpus against real RestrictedPython and assert report shape."""
+        prober = DynamicProber(config=SandboxConfig(timeout_seconds=2.0))
+        report = prober.run(PAYLOADS)
+
+        assert len(report) == len(PAYLOADS)
+        assert len(report) >= 10
+
+        required_keys = {
+            "payload_id",
+            "technique",
+            "source",
+            "code",
+            "static_verdict",
+            "static_flagged",
+            "executed",
+            "escaped",
+            "timing",
+            "stdout",
+            "stderr",
+            "exception",
+            "timed_out",
+        }
+
+        for row in report:
+            assert required_keys.issubset(row.keys())
+            assert isinstance(row["payload_id"], str)
+            assert isinstance(row["technique"], str)
+            assert isinstance(row["source"], str)
+            assert isinstance(row["code"], str)
+            assert isinstance(row["static_verdict"], list)
+            assert isinstance(row["static_flagged"], bool)
+            assert isinstance(row["executed"], bool)
+            assert isinstance(row["escaped"], bool)
+            assert isinstance(row["timing"], float)
+            assert row["timing"] >= 0.0
+
+            # Under real RestrictedPython, none of the corpus payloads break out
+            assert row["escaped"] is False
+
+    def test_dependency_injection_custom_exec_and_oracle(self) -> None:
+        """Verify custom sandbox_exec and oracle functions can be injected into DynamicProber."""
+        custom_exec_called = False
+        custom_oracle_called = False
+
+        def mock_exec(code: str, timeout: float = 3.0, config: Any = None) -> dict[str, Any]:
+            nonlocal custom_exec_called
+            custom_exec_called = True
+            return {
+                "executed": True,
+                "stdout": "mocked",
+                "stderr": "",
+                "exception": None,
+                "timed_out": False,
+            }
+
+        def mock_oracle(pre: Any, res: Any, post: Any) -> bool:
+            nonlocal custom_oracle_called
+            custom_oracle_called = True
+            return True
+
+        custom_prober = DynamicProber(
+            sandbox_exec=mock_exec,
+            oracle=mock_oracle,
+            config={"seed": 100},
+        )
+
+        test_payload = [
+            {"id": "p0", "code": "pass", "technique": "test_tech", "source": "test_source"}
+        ]
+        results = custom_prober.run(test_payload)
+
+        assert custom_exec_called is True
+        assert custom_oracle_called is True
+        assert len(results) == 1
+        assert results[0]["executed"] is True
+        assert results[0]["escaped"] is True
+
+    def test_probe_single_payload(self) -> None:
+        """Verify probe_payload executes a single payload and returns expected dict."""
+        prober = DynamicProber()
+        single_result = prober.probe_payload(PAYLOADS[0])
+
+        assert isinstance(single_result, dict)
+        assert single_result["payload_id"] == PAYLOADS[0]["id"]
+        assert single_result["technique"] == PAYLOADS[0]["technique"]
+        assert "escaped" in single_result
+        assert "executed" in single_result
+        assert "static_verdict" in single_result

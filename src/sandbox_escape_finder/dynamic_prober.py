@@ -9,16 +9,24 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any, Callable
 
-if TYPE_CHECKING:
-    from sandbox_escape_finder.config import SandboxConfig
-    from sandbox_escape_finder.oracle import EscapeOracle, OracleVerdict
+from sandbox_escape_finder.config import SandboxConfig, load_config
+from sandbox_escape_finder.oracle import (
+    CanaryState,
+    EscapeOracle,
+    OracleVerdict,
+    capture_canary_state,
+    oracle as default_oracle_func,
+)
+from sandbox_escape_finder.static_analyzer import StaticAnalyzer
 
 
 _WORKER_SCRIPT = """
@@ -272,39 +280,136 @@ class DynamicProber:
     and ground-truth verification via EscapeOracle.
     """
 
-    def __init__(self, config: SandboxConfig | None = None, oracle: EscapeOracle | None = None) -> None:
-        """Initialize the prober with sandbox configuration and an optional oracle.
+    def __init__(
+        self,
+        sandbox_exec: Callable[..., dict[str, Any]] | None = None,
+        oracle: EscapeOracle | Callable[..., bool] | None = None,
+        config: SandboxConfig | dict[str, Any] | None = None,
+    ) -> None:
+        """Initialize the prober with execution engine, oracle, and configuration.
 
         Args:
-            config: SandboxConfig defining timeouts, seeds, and canary parameters.
-            oracle: Optional EscapeOracle instance. If None, a default instance is created.
+            sandbox_exec: Optional execution callable. Defaults to sandbox_exec().
+            oracle: Optional EscapeOracle instance or oracle checking callable.
+            config: Optional SandboxConfig instance or dictionary.
         """
-        from sandbox_escape_finder.config import load_config
-        from sandbox_escape_finder.oracle import EscapeOracle
+        # Support positional config passing for backward compatibility
+        if isinstance(sandbox_exec, (SandboxConfig, dict)) and config is None and oracle is None:
+            config = sandbox_exec
+            sandbox_exec = None
 
-        self.config = config if config is not None else load_config()
-        self.oracle = oracle if oracle is not None else EscapeOracle(self.config)
+        self.config: SandboxConfig = load_config(config)
 
-    def probe_payload(self, payload: Payload) -> ProbeReportEntry:
+        self.sandbox_exec: Callable[..., dict[str, Any]] = (
+            sandbox_exec if sandbox_exec is not None else globals()["sandbox_exec"]
+        )
+
+        if isinstance(oracle, EscapeOracle):
+            self.oracle_manager = oracle
+            self.oracle_check: Callable[..., bool] = default_oracle_func
+        elif callable(oracle):
+            self.oracle_check = oracle
+            self.oracle_manager = EscapeOracle(self.config)
+        else:
+            self.oracle_manager = EscapeOracle(self.config)
+            self.oracle_check = default_oracle_func
+
+        self.oracle = self.oracle_manager
+        self.analyzer = StaticAnalyzer(config=self.config)
+
+    def probe_payload(self, payload: Payload | dict[str, Any]) -> dict[str, Any]:
         """Execute a single payload in a dedicated, isolated subprocess.
 
         Args:
             payload: Payload specification to execute against RestrictedPython.
 
         Returns:
-            ProbeReportEntry: Execution details and oracle verdict.
+            dict[str, Any]: Execution details, static verdict, and oracle verdict.
         """
-        raise NotImplementedError("Stub only: isolated payload execution logic will be implemented in subsequent steps.")
+        results = self.run([payload])
+        return results[0]
 
-    def run(self, payload_corpus: list[Payload]) -> list[ProbeReportEntry]:
+    def run(
+        self, payload_corpus: list[Payload] | list[dict[str, Any]] | None = None
+    ) -> list[dict[str, Any]]:
         """Execute a corpus of payloads sequentially within isolated subprocesses.
 
         Args:
-            payload_corpus: List of attributed payloads to evaluate.
+            payload_corpus: Optional list of attributed payloads to evaluate.
+                If None, defaults to the canonical PAYLOADS corpus.
 
         Returns:
-            list[ProbeReportEntry]: Per-payload results containing execution status,
-                timing, and oracle ground-truth escape verdicts.
+            list[dict[str, Any]]: Per-payload results containing static verdict,
+                execution metrics, oracle ground-truth escape verdicts, and timing.
         """
-        raise NotImplementedError("Stub only: corpus probing logic will be implemented in subsequent steps.")
+        from sandbox_escape_finder.oracle import capture_canary_state
+
+        if payload_corpus is None:
+            from sandbox_escape_finder.payloads import PAYLOADS
+
+            corpus: list[Payload | dict[str, Any]] = list(PAYLOADS)
+        else:
+            corpus = list(payload_corpus)
+
+        # Deterministic sampling and ordering respecting config seed
+        seed = getattr(self.config, "random_seed", 42)
+        rng = random.Random(seed)
+
+        # Support optional shuffling or sampling if requested in config
+        if getattr(self.config, "shuffle", False):
+            rng.shuffle(corpus)
+
+        report: list[dict[str, Any]] = []
+
+        for idx, item in enumerate(corpus):
+            if isinstance(item, dict):
+                code = item["code"]
+                technique = item["technique"]
+                source = item.get("source", "")
+                payload_id = item.get("id", f"payload_{idx:02d}")
+                description = item.get("description", "")
+            else:
+                code = item.code
+                technique = item.technique
+                source = item.source
+                payload_id = item.id
+                description = item.description
+
+            # Setup throwaway canary for this run
+            canary_path = self.oracle_manager.setup_canary()
+            pre_state = capture_canary_state(canary_path)
+
+            start_time = time.perf_counter()
+            exec_res = self.sandbox_exec(
+                code,
+                timeout=self.config.timeout_seconds,
+                config=self.config,
+            )
+            duration = time.perf_counter() - start_time
+
+            post_state = capture_canary_state(canary_path)
+            escaped = self.oracle_check(pre_state, exec_res, post_state)
+            self.oracle_manager.cleanup()
+
+            static_findings = self.analyzer.scan(code)
+
+            entry: dict[str, Any] = {
+                "payload_id": payload_id,
+                "technique": technique,
+                "source": source,
+                "code": code,
+                "description": description,
+                "static_verdict": static_findings,
+                "static_flagged": len(static_findings) > 0,
+                "executed": bool(exec_res.get("executed", False)),
+                "escaped": bool(escaped),
+                "timing": round(duration, 4),
+                "stdout": exec_res.get("stdout", ""),
+                "stderr": exec_res.get("stderr", ""),
+                "exception": exec_res.get("exception"),
+                "timed_out": bool(exec_res.get("timed_out", False)),
+            }
+            report.append(entry)
+
+        return report
 
