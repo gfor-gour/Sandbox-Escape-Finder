@@ -10,6 +10,9 @@ from typing import Any
 CANONICAL_TECHNIQUES: tuple[str, ...] = (
     "subclasses_traversal",
     "globals_access",
+    "builtins_restoration",
+    "frame_introspection",
+    "format_string_attribute_access",
 )
 
 

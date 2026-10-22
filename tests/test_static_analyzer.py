@@ -129,6 +129,121 @@ update_global_counter(result)
         assert findings == []
 
 
+class TestBuiltinsRestorationDetector:
+    """Tests for the __builtins__ restoration detector."""
+
+    def test_positive_globals_builtins_subscript(self) -> None:
+        payload = "(lambda: None).__globals__['__builtins__']['eval']"
+        analyzer = StaticAnalyzer(config={"enabled_techniques": ["builtins_restoration"]})
+        findings = analyzer.scan(payload)
+
+        assert len(findings) == 1
+        assert findings[0]["technique"] == "builtins_restoration"
+        assert findings[0]["confidence"] == "HIGH"
+        assert "__builtins__" in findings[0]["reason"]
+        assert findings[0]["node_location"] == (1, 0)
+
+    def test_positive_getattr_and_get_variants(self) -> None:
+        payload = "a = getattr(fn, '__builtins__')\nb = env.get('__builtins__')\n"
+        analyzer = StaticAnalyzer(config={"enabled_techniques": ["builtins_restoration"]})
+        findings = analyzer.scan(payload)
+        assert [f["node_location"][0] for f in findings] == [1, 2]
+
+    def test_negative_setting_and_defining_builtins(self) -> None:
+        """Tricky: the key '__builtins__' appears, but only to *lock down* an exec env."""
+        benign_code = """
+env = {"__builtins__": {}}
+env["__builtins__"] = {"len": len}
+keys = ["__builtins__", "__name__"]
+msg = "do not touch __builtins__ here"
+safe = env.get("user_value")
+"""
+        analyzer = StaticAnalyzer(config={"enabled_techniques": ["builtins_restoration"]})
+        assert analyzer.scan(benign_code) == []
+
+
+class TestFrameIntrospectionDetector:
+    """Tests for the generator / frame introspection detector."""
+
+    def test_positive_gi_frame_f_back_chain(self) -> None:
+        payload = "g = (x for x in [1])\nf = g.gi_frame.f_back.f_globals\n"
+        analyzer = StaticAnalyzer(config={"enabled_techniques": ["frame_introspection"]})
+        findings = analyzer.scan(payload)
+
+        assert len(findings) == 3
+        assert {f["technique"] for f in findings} == {"frame_introspection"}
+        by_reason = {f["reason"]: f["confidence"] for f in findings}
+        assert by_reason["Access to frame-related attribute 'gi_frame' to reach the call stack."] == "HIGH"
+        assert by_reason["Access to frame-related attribute 'f_back' to reach the call stack."] == "MEDIUM"
+        assert all(f["node_location"][0] == 2 for f in findings)
+
+    def test_positive_sys_getframe(self) -> None:
+        analyzer = StaticAnalyzer(config={"enabled_techniques": ["frame_introspection"]})
+        findings = analyzer.scan("import sys\nsys._getframe(1)\n")
+        assert len(findings) == 1
+        assert findings[0]["confidence"] == "HIGH"
+
+    def test_negative_ordinary_generators(self) -> None:
+        """Tricky: heavy generator use, a variable called 'frame', and frame words in strings."""
+        benign_code = """
+def numbers(limit):
+    for i in range(limit):
+        received = yield i
+        if received:
+            return
+
+gen = numbers(5)
+first = next(gen)
+gen.send(None)
+running = gen.gi_running
+frame = {"gi_frame": "just a dict key", "f_back": 1}
+label = "call f_back to go up"
+result = frame["f_back"] + len(label)
+"""
+        analyzer = StaticAnalyzer(config={"enabled_techniques": ["frame_introspection"]})
+        assert analyzer.scan(benign_code) == []
+
+
+class TestFormatStringAttributeAccessDetector:
+    """Tests for the str.format implicit attribute access detector."""
+
+    def test_positive_format_dunder_chain(self) -> None:
+        payload = '"{0.__init__.__globals__}".format(some_func)'
+        analyzer = StaticAnalyzer(config={"enabled_techniques": ["format_string_attribute_access"]})
+        findings = analyzer.scan(payload)
+
+        assert len(findings) == 1
+        assert findings[0]["technique"] == "format_string_attribute_access"
+        assert findings[0]["confidence"] == "HIGH"
+        assert "__init__" in findings[0]["reason"] and "__globals__" in findings[0]["reason"]
+        assert findings[0]["node_location"] == (1, 0)
+
+    def test_positive_nested_spec_and_str_format_form(self) -> None:
+        payload = 'str.format("{0:{1.__class__}}", a, b)'
+        analyzer = StaticAnalyzer(config={"enabled_techniques": ["format_string_attribute_access"]})
+        assert len(analyzer.scan(payload)) == 1
+
+    def test_negative_benign_and_escaped_format(self) -> None:
+        """Tricky: attribute/index access in format, plus an escaped-brace dunder that is literal text."""
+        benign_code = """
+user = get_user()
+a = "{0.name} has {1[key]} items".format(user, data)
+b = "{{0.__class__}} is literal text".format()
+c = "{0!r:>{width}}".format(user, width=10)
+d = "{x.__class__}"  # not formatted at all
+"""
+        analyzer = StaticAnalyzer(config={"enabled_techniques": ["format_string_attribute_access"]})
+        assert analyzer.scan(benign_code) == []
+
+    def test_fstring_is_not_this_detectors_job(self) -> None:
+        """f-string attribute access is a normal ast.Attribute, caught by detector 2."""
+        payload = "f'{fn.__globals__}'"
+        fmt = StaticAnalyzer(config={"enabled_techniques": ["format_string_attribute_access"]})
+        glob = StaticAnalyzer(config={"enabled_techniques": ["globals_access"]})
+        assert fmt.scan(payload) == []
+        assert len(glob.scan(payload)) == 1
+
+
 class TestConfigAndOrchestration:
     """Tests verifying configuration filtering, typed models, and scanner orchestration."""
 
