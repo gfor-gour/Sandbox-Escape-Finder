@@ -66,8 +66,8 @@ PAYLOADS: list[dict[str, str]] = [
         "id": "builtins_direct_canary_write",
         "technique": "builtins_restoration",
         "source": "standard technique, not verbatim from a catalog",
-        "code": "__builtins__['open']('canary_token.txt', 'w').write('PWNED')",
-        "description": "Direct access to open() via __builtins__ dictionary to overwrite canary file.",
+        "code": "__builtins__['open']('{canary_path}', 'w').write('PWNED')",
+        "description": "Direct access to open() via __builtins__ dictionary targeting the isolated canary path.",
     },
     {
         "id": "builtins_loader_recovery",
@@ -141,6 +141,28 @@ PAYLOADS: list[dict[str, str]] = [
         "source": "jailctf/pyjailbreaker (jailbreak/gadgets/python/dict_getitem.py::dict_getitem__attrerror)",
         "code": "d = {'a': 1}\nkey = 'a'\ntry:\n    f\"{{{key}.xx}}\".format_map(d)\nexcept Exception as e:\n    e.obj",
         "description": "Use a format_map field's failing attribute lookup ('.xx') so AttributeError.obj leaks the dict value, with no subscript or getattr call.",
+    },
+    # --- Adaptive variants probing non-underscore & dynamic evasion paths ---
+    {
+        "id": "adaptive_traceback_frame_walk",
+        "technique": "frame_introspection",
+        "source": "standard technique, not verbatim from a catalog",
+        "code": "try:\n    1 / 0\nexcept Exception:\n    sys.exc_info()[2].tb_frame.f_back",
+        "description": "Attempt to reach call stack frames via traceback tb_frame and f_back which have no leading underscore.",
+    },
+    {
+        "id": "adaptive_getattr_string_concat",
+        "technique": "subclasses_traversal",
+        "source": "jailctf/pyjailbreaker (stringless / dynamic attribute resolution)",
+        "code": "attr_name = '__sub' + 'classes__'\ngetattr(object, attr_name)()",
+        "description": "Assemble target attribute name at runtime to evade compile-time AST attribute checks and call via getattr. (Known limitation: genuine static-analyzer blind spot with no literal dunder AST node; fails dynamically because getattr is absent from safe_globals, not because the analyzer caught anything equivalent).",
+    },
+    {
+        "id": "adaptive_format_map_runtime_template",
+        "technique": "format_string_attribute_access",
+        "source": "jailctf/pyjailbreaker (jailbreak/gadgets/python/dict_getitem.py)",
+        "code": "key = 'v'\nf\"{{{key}.__class__}}\".format_map({key: object})",
+        "description": "Construct template dynamically at runtime with f-string to perform attribute lookup through format_map.",
     },
 ]
 

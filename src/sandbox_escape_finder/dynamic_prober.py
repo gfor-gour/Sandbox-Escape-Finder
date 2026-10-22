@@ -30,9 +30,13 @@ from sandbox_escape_finder.static_analyzer import StaticAnalyzer
 
 
 _WORKER_SCRIPT = """
+import ast
+import builtins
 import io
 import json
+import os
 import sys
+import types
 from contextlib import redirect_stderr, redirect_stdout
 
 import RestrictedPython
@@ -58,21 +62,96 @@ except Exception as e:
         "stderr": "",
         "exception": f"PayloadReadError: {e}",
         "timed_out": False,
+        "capability_recovered": False,
     }
     with open(result_file, "w", encoding="utf-8") as f:
         json.dump(out, f)
     sys.exit(0)
 
+DANGEROUS_CALLABLES = {
+    eval,
+    exec,
+    __import__,
+    open,
+    compile,
+}
+
+DANGEROUS_MODULE_NAMES = {
+    "os", "sys", "subprocess", "posix", "nt", "shutil", "builtins", "__builtin__", "importlib"
+}
+
+def is_dangerous(obj, depth=0, seen=None):
+    if seen is None:
+        seen = set()
+    obj_id = id(obj)
+    if obj_id in seen or depth > 3:
+        return False
+    seen.add(obj_id)
+
+    if callable(obj) and (obj in DANGEROUS_CALLABLES or getattr(obj, "__name__", "") in ("eval", "exec", "open", "__import__", "system", "popen")):
+        return True
+
+    if isinstance(obj, types.ModuleType):
+        mod_name = getattr(obj, "__name__", "")
+        if mod_name in DANGEROUS_MODULE_NAMES or mod_name.startswith("os.") or mod_name.startswith("sys."):
+            return True
+
+    if isinstance(obj, types.FrameType) or hasattr(obj, "f_builtins") or (hasattr(obj, "f_globals") and hasattr(obj, "f_back")):
+        return True
+
+    if obj is getattr(builtins, "__dict__", None) or obj is builtins:
+        return True
+
+    if isinstance(obj, type):
+        mod = getattr(obj, "__module__", "")
+        if mod in DANGEROUS_MODULE_NAMES or "wrap_close" in getattr(obj, "__name__", ""):
+            return True
+
+    if isinstance(obj, dict):
+        for dang in ("eval", "open", "__import__", "exec"):
+            if dang in obj and callable(obj[dang]):
+                return True
+        if depth < 2:
+            for k, v in list(obj.items())[:50]:
+                if is_dangerous(v, depth + 1, seen):
+                    return True
+
+    if isinstance(obj, (list, tuple, set)):
+        if depth < 2:
+            for item in list(obj)[:50]:
+                if is_dangerous(item, depth + 1, seen):
+                    return True
+
+    if hasattr(obj, "__globals__") and isinstance(obj.__globals__, dict):
+        fn_builtins = obj.__globals__.get("__builtins__")
+        if fn_builtins is not None and isinstance(fn_builtins, dict) and "eval" in fn_builtins:
+            return True
+
+    return False
+
 stdout_buf = io.StringIO()
 stderr_buf = io.StringIO()
 executed = False
 exc_str = None
+capability_recovered = False
+byte_code = None
 
 try:
-    byte_code = compile_restricted(code, filename="<sandbox>", mode="exec")
-except Exception as e:
-    exc_str = f"{type(e).__name__}: {e}"
-else:
+    tree = ast.parse(code)
+    if tree.body and isinstance(tree.body[-1], ast.Expr):
+        tree.body[-1] = ast.Assign(
+            targets=[ast.Name(id='captured_payload_expr', ctx=ast.Store())],
+            value=tree.body[-1].value
+        )
+        ast.fix_missing_locations(tree)
+    byte_code = compile_restricted(tree, filename="<sandbox>", mode="exec")
+except Exception:
+    try:
+        byte_code = compile_restricted(code, filename="<sandbox>", mode="exec")
+    except Exception as e:
+        exc_str = f"{type(e).__name__}: {e}"
+
+if byte_code is not None:
     restricted_globals = safe_globals.copy()
     restricted_globals["_print_"] = PrintCollector
     restricted_globals["_getattr_"] = safer_getattr
@@ -98,12 +177,26 @@ else:
         except Exception:
             pass
 
+    if executed:
+        ignored_keys = {
+            "_print_", "_getattr_", "_getitem_", "_getiter_",
+            "_iter_unpack_sequence_", "_unpack_sequence_", "_write_",
+            "__builtins__", "_print"
+        }
+        for k, v in list(restricted_globals.items()):
+            if k in ignored_keys:
+                continue
+            if is_dangerous(v):
+                capability_recovered = True
+                break
+
 out = {
     "executed": executed,
     "stdout": stdout_buf.getvalue(),
     "stderr": stderr_buf.getvalue(),
     "exception": exc_str,
     "timed_out": False,
+    "capability_recovered": capability_recovered,
 }
 
 with open(result_file, "w", encoding="utf-8") as f:
@@ -115,18 +208,21 @@ def sandbox_exec(
     code: str,
     timeout: float | None = None,
     config: SandboxConfig | None = None,
+    work_dir: Path | str | None = None,
 ) -> dict[str, Any]:
     """Execute code within an isolated RestrictedPython subprocess.
 
     Compiles code using RestrictedPython's compile_restricted, executes with
     safe_globals and standard runtime guards inside a dedicated subprocess,
-    and returns a structured execution dictionary.
+    and returns a structured execution dictionary including capability recovery metrics.
 
     Args:
         code: Python source code string to compile and execute.
         timeout: Optional execution timeout in seconds. If omitted, uses
             config.timeout_seconds if available, else defaults to 3.0 seconds.
         config: Optional SandboxConfig instance.
+        work_dir: Optional working directory for the sandbox execution. If omitted,
+            a dedicated disposable temporary directory is created and cleaned up.
 
     Returns:
         dict[str, Any]: Execution result dictionary with keys:
@@ -135,6 +231,7 @@ def sandbox_exec(
             - stderr (str): Standard error captured during execution.
             - exception (str | None): Exception message if compilation or execution failed.
             - timed_out (bool): True if execution timed out.
+            - capability_recovered (bool): True if dangerous capabilities (e.g. os, eval) were recovered.
 
     Notes:
         Never raises an uncaught exception back to the caller. A crash or syntax
@@ -146,8 +243,7 @@ def sandbox_exec(
     elif config is not None:
         effective_timeout = config.timeout_seconds
 
-    with tempfile.TemporaryDirectory(prefix="sandbox_run_") as tmpdir:
-        tmp_path = Path(tmpdir)
+    def _execute_in_dir(tmp_path: Path) -> dict[str, Any]:
         code_file = tmp_path / "payload.py"
         result_file = tmp_path / "result.json"
 
@@ -160,6 +256,7 @@ def sandbox_exec(
                 "stderr": "",
                 "exception": f"WritePayloadError: {e}",
                 "timed_out": False,
+                "capability_recovered": False,
             }
 
         try:
@@ -178,6 +275,7 @@ def sandbox_exec(
                 "stderr": "",
                 "exception": f"TimeoutExpired: Execution exceeded timeout of {effective_timeout}s",
                 "timed_out": True,
+                "capability_recovered": False,
             }
         except Exception as e:
             return {
@@ -186,12 +284,14 @@ def sandbox_exec(
                 "stderr": "",
                 "exception": f"{type(e).__name__}: {e}",
                 "timed_out": False,
+                "capability_recovered": False,
             }
 
         if result_file.is_file():
             try:
                 with open(result_file, "r", encoding="utf-8") as f:
                     result_data = json.load(f)
+                result_data["capability_recovered"] = bool(result_data.get("capability_recovered", False))
                 return result_data
             except Exception as e:
                 return {
@@ -200,6 +300,7 @@ def sandbox_exec(
                     "stderr": proc.stderr or "",
                     "exception": f"SerializationError: Failed to read runner output: {e}",
                     "timed_out": False,
+                    "capability_recovered": False,
                 }
         else:
             return {
@@ -208,7 +309,17 @@ def sandbox_exec(
                 "stderr": proc.stderr or "",
                 "exception": f"ProcessTerminated: Subprocess exited with code {proc.returncode}",
                 "timed_out": False,
+                "capability_recovered": False,
             }
+
+    if work_dir is not None:
+        target_dir = Path(work_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        return _execute_in_dir(target_dir)
+
+    with tempfile.TemporaryDirectory(prefix="sandbox_run_") as tmpdir:
+        return _execute_in_dir(Path(tmpdir))
+
 
 
 @dataclass(frozen=True)
@@ -379,12 +490,20 @@ class DynamicProber:
             canary_path = self.oracle_manager.setup_canary()
             pre_state = capture_canary_state(canary_path)
 
+            formatted_code = code.replace("{canary_path}", str(canary_path).replace("\\", "/"))
+
             start_time = time.perf_counter()
-            exec_res = self.sandbox_exec(
-                code,
-                timeout=self.config.timeout_seconds,
-                config=self.config,
-            )
+            import inspect
+
+            exec_sig = inspect.signature(self.sandbox_exec)
+            exec_kwargs: dict[str, Any] = {
+                "timeout": self.config.timeout_seconds,
+                "config": self.config,
+            }
+            if "work_dir" in exec_sig.parameters:
+                exec_kwargs["work_dir"] = canary_path.parent
+
+            exec_res = self.sandbox_exec(formatted_code, **exec_kwargs)
             duration = time.perf_counter() - start_time
 
             post_state = capture_canary_state(canary_path)
@@ -403,6 +522,7 @@ class DynamicProber:
                 "static_flagged": len(static_findings) > 0,
                 "executed": bool(exec_res.get("executed", False)),
                 "escaped": bool(escaped),
+                "capability_recovered": bool(exec_res.get("capability_recovered", False)),
                 "timing": round(duration, 4),
                 "stdout": exec_res.get("stdout", ""),
                 "stderr": exec_res.get("stderr", ""),

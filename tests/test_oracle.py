@@ -230,3 +230,24 @@ os.remove(r'{canary_path}')
 
         assert temp_dir_to_check is not None
         assert not temp_dir_to_check.exists()
+
+    def test_builtins_direct_canary_write_in_toy_sandbox(
+        self,
+        broken_toy_sandbox: Callable[[str], dict[str, Any]],
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        """Verify builtins_direct_canary_write targets the actual canary path and registers escape."""
+        from sandbox_escape_finder.payloads import PAYLOADS
+
+        payload = next(p for p in PAYLOADS if p["id"] == "builtins_direct_canary_write")
+        with EscapeOracle() as oracle_inst:
+            canary_path = oracle_inst.canary_path
+            assert canary_path is not None
+            code = payload["code"].replace("{canary_path}", str(canary_path).replace("\\", "/"))
+
+            exec_result = broken_toy_sandbox(code)
+            assert exec_result["executed"] is True
+
+            verdict = oracle_inst.evaluate(exec_result)
+            assert verdict.escaped is True
+            assert canary_path.read_text(encoding="utf-8") == "PWNED"

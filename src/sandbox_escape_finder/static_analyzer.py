@@ -62,7 +62,17 @@ class Finding:
 
 
 def detect_subclasses_traversal(tree: ast.AST) -> list[Finding]:
-    """Flag attempts to reach object hierarchy via __subclasses__ attribute or call."""
+    """Flag attempts to reach object hierarchy via __subclasses__ attribute or call.
+
+    Known Limitation:
+        Dynamic attribute resolution (e.g. ``adaptive_getattr_string_concat``,
+        where ``'__sub' + 'classes__'`` is concatenated at runtime and accessed
+        via ``getattr``) is a genuine static-analyzer blind spot because no
+        literal dunder AST node exists in the syntax tree. When such a payload
+        fails in the sandbox, it fails for an unrelated environmental reason
+        (``getattr`` absent from ``safe_globals``), NOT because the static
+        analyzer caught anything equivalent.
+    """
     findings: list[Finding] = []
 
     for node in ast.walk(tree):

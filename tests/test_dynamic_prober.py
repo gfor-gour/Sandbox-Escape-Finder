@@ -27,6 +27,7 @@ print(f"total: {total}")
         assert "total: 30" in result["stdout"]
         assert result["exception"] is None
         assert result["timed_out"] is False
+        assert result["capability_recovered"] is False
 
     def test_restricted_syntax_reported_as_result_not_exception(self) -> None:
         """Verify RestrictedPython compiler errors (e.g. leading underscore) are caught."""
@@ -110,6 +111,7 @@ class TestDynamicProberCorpus:
             "static_flagged",
             "executed",
             "escaped",
+            "capability_recovered",
             "timing",
             "stdout",
             "stderr",
@@ -127,11 +129,13 @@ class TestDynamicProberCorpus:
             assert isinstance(row["static_flagged"], bool)
             assert isinstance(row["executed"], bool)
             assert isinstance(row["escaped"], bool)
+            assert isinstance(row["capability_recovered"], bool)
             assert isinstance(row["timing"], float)
             assert row["timing"] >= 0.0
 
             # Under real RestrictedPython, none of the corpus payloads break out
             assert row["escaped"] is False
+            assert row["capability_recovered"] is False
 
     def test_dependency_injection_custom_exec_and_oracle(self) -> None:
         """Verify custom sandbox_exec and oracle functions can be injected into DynamicProber."""
@@ -147,6 +151,7 @@ class TestDynamicProberCorpus:
                 "stderr": "",
                 "exception": None,
                 "timed_out": False,
+                "capability_recovered": True,
             }
 
         def mock_oracle(pre: Any, res: Any, post: Any) -> bool:
@@ -170,6 +175,7 @@ class TestDynamicProberCorpus:
         assert len(results) == 1
         assert results[0]["executed"] is True
         assert results[0]["escaped"] is True
+        assert results[0]["capability_recovered"] is True
 
     def test_probe_single_payload(self) -> None:
         """Verify probe_payload executes a single payload and returns expected dict."""
