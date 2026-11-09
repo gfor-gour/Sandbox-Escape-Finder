@@ -296,3 +296,52 @@ y = (lambda: None).__globals__
         broken_code = "def invalid_syntax(:"
         analyzer = StaticAnalyzer()
         assert analyzer.scan(broken_code) == []
+
+
+class TestDynamicGetattrHeuristic:
+    """Tests for the taint-ish heuristic detecting non-literal getattr() invocations."""
+
+    def test_flags_concatenated_string_getattr(self) -> None:
+        """getattr(obj, '__sub' + 'classes__') passes a BinOp (not a string literal)."""
+        code = "getattr(object, '__sub' + 'classes__')()"
+        analyzer = StaticAnalyzer(config=SandboxConfig(heuristic_dynamic_getattr=True))
+        findings = analyzer.scan(code)
+
+        assert len(findings) == 1
+        assert findings[0]["technique"] == "dynamic_attribute_lookup"
+        assert findings[0]["confidence"] == "LOW"
+        assert "non-literal" in findings[0]["reason"]
+
+    def test_flags_variable_name_getattr(self) -> None:
+        """getattr(int, base_name) passes a Name node (variable), not a string literal."""
+        code = "base_name = '__base__'\ngetattr(int, base_name)"
+        analyzer = StaticAnalyzer(config=SandboxConfig(heuristic_dynamic_getattr=True))
+        findings = analyzer.scan(code)
+
+        assert len(findings) == 1
+        assert findings[0]["technique"] == "dynamic_attribute_lookup"
+        assert findings[0]["confidence"] == "LOW"
+
+    def test_ignores_literal_string_getattr(self) -> None:
+        """Benign getattr(obj, 'attribute_name') has a string literal and should not be flagged."""
+        code = "name = getattr(user, 'username', 'anonymous')"
+        analyzer = StaticAnalyzer(config=SandboxConfig(heuristic_dynamic_getattr=True))
+        findings = analyzer.scan(code)
+
+        assert findings == []
+
+    def test_catches_adaptive_getattr_string_concat_payload(self) -> None:
+        """Verifies the heuristic eliminates the static analyzer false negative on adaptive_getattr_string_concat."""
+        from sandbox_escape_finder.payloads import PAYLOADS
+        payload = next(p for p in PAYLOADS if p["id"] == "adaptive_getattr_string_concat")
+
+        # Baseline: pure AST literal scanner misses runtime string construction
+        baseline_analyzer = StaticAnalyzer()
+        assert baseline_analyzer.scan(payload["code"]) == []
+
+        # Heuristic mode: flags both dynamic getattr() invocations
+        heuristic_analyzer = StaticAnalyzer(config=SandboxConfig(heuristic_dynamic_getattr=True))
+        findings = heuristic_analyzer.scan(payload["code"])
+        assert len(findings) == 2
+        assert all(f["technique"] == "dynamic_attribute_lookup" for f in findings)
+

@@ -27,6 +27,8 @@ class SandboxConfig:
         random_seed: Random seed for deterministic payload ordering.
         temp_dir: Optional base directory for temporary run environments.
         enabled_techniques: Canonical names of static detectors to execute.
+        heuristic_dynamic_getattr: If True, enables the taint-ish heuristic detector
+            that flags any getattr() call with a non-string-literal attribute argument.
     """
 
     timeout_seconds: float = 3.0
@@ -35,6 +37,7 @@ class SandboxConfig:
     random_seed: int = 42
     temp_dir: Path | None = None
     enabled_techniques: tuple[str, ...] = CANONICAL_TECHNIQUES
+    heuristic_dynamic_getattr: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize configuration to a dictionary."""

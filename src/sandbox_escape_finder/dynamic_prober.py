@@ -204,19 +204,27 @@ with open(result_file, "w", encoding="utf-8") as f:
 """
 
 
-def sandbox_exec(
+def _run_worker_script(
+    worker_script: str,
     code: str,
     timeout: float | None = None,
     config: SandboxConfig | None = None,
     work_dir: Path | str | None = None,
 ) -> dict[str, Any]:
-    """Execute code within an isolated RestrictedPython subprocess.
+    """Execute `code` against an isolated subprocess running `worker_script`.
 
-    Compiles code using RestrictedPython's compile_restricted, executes with
-    safe_globals and standard runtime guards inside a dedicated subprocess,
-    and returns a structured execution dictionary including capability recovery metrics.
+    This is the shared subprocess-isolation harness (temp-dir handling, hard
+    timeout, result-file protocol) used by `sandbox_exec` (the hardened,
+    documented RestrictedPython configuration) and by every sandbox variant in
+    `misconfigured_sandboxes.py` (deliberately weakened configurations used to
+    show what happens when an integrator departs from the hardened setup).
+    Only the worker script text differs between callers; isolation guarantees
+    (subprocess boundary, disposable work dir, enforced timeout) are identical.
 
     Args:
+        worker_script: Python source for the in-subprocess runner (reads
+            code_file, compiles/executes it under some RestrictedPython
+            configuration, writes a JSON result to result_file).
         code: Python source code string to compile and execute.
         timeout: Optional execution timeout in seconds. If omitted, uses
             config.timeout_seconds if available, else defaults to 3.0 seconds.
@@ -261,7 +269,7 @@ def sandbox_exec(
 
         try:
             proc = subprocess.run(
-                [sys.executable, "-u", "-c", _WORKER_SCRIPT, str(code_file), str(result_file)],
+                [sys.executable, "-u", "-c", worker_script, str(code_file), str(result_file)],
                 capture_output=True,
                 text=True,
                 timeout=effective_timeout,
@@ -320,6 +328,40 @@ def sandbox_exec(
     with tempfile.TemporaryDirectory(prefix="sandbox_run_") as tmpdir:
         return _execute_in_dir(Path(tmpdir))
 
+
+def sandbox_exec(
+    code: str,
+    timeout: float | None = None,
+    config: SandboxConfig | None = None,
+    work_dir: Path | str | None = None,
+) -> dict[str, Any]:
+    """Execute code within an isolated, hardened RestrictedPython subprocess.
+
+    This is the hardened, documented configuration: `compile_restricted` plus
+    the complete `safe_globals` runtime guard set, exactly as RestrictedPython's
+    own usage docs describe (including `_getattr_` wired to `safer_getattr`,
+    the guard responsible for blocking string-formatting-based attribute
+    traversal). It is the baseline every payload in `payloads.py` is first
+    measured against.
+
+    See `misconfigured_sandboxes.py` for the companion experiment: the same
+    payload corpus run against the same RestrictedPython version but with one
+    realistic, documented-elsewhere integration mistake applied at a time, to
+    show that the gap this project's payloads need is in integration, not in
+    RestrictedPython's own compiler.
+
+    Args:
+        code: Python source code string to compile and execute.
+        timeout: Optional execution timeout in seconds. If omitted, uses
+            config.timeout_seconds if available, else defaults to 3.0 seconds.
+        config: Optional SandboxConfig instance.
+        work_dir: Optional working directory for the sandbox execution. If omitted,
+            a dedicated disposable temporary directory is created and cleaned up.
+
+    Returns:
+        dict[str, Any]: See `_run_worker_script`.
+    """
+    return _run_worker_script(_WORKER_SCRIPT, code, timeout=timeout, config=config, work_dir=work_dir)
 
 
 @dataclass(frozen=True)

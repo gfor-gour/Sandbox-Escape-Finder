@@ -94,8 +94,21 @@ PAYLOADS: list[dict[str, str]] = [
         "id": "encoding_format_string_introspection",
         "technique": "format_string_attribute_access",
         "source": "standard technique, not verbatim from a catalog",
-        "code": "'{0.__class__.__bases__[0].__subclasses__()}'.format('')",
-        "description": "Use str.format attribute accessor syntax to bypass dot attribute scanning.",
+        "code": "gadget = '{0.__class__.__bases__[0].__subclasses__}'.format('')",
+        "description": (
+            "Use str.format attribute accessor syntax to bypass dot attribute scanning and "
+            "leak, as a string, the identity of object.__subclasses__ -- information a correctly "
+            "sandboxed program must never observe. str.format's field grammar supports attribute "
+            "and item access but not method calls, so the chain can only be *stringified*, never "
+            "invoked; this is an information-disclosure primitive, not by itself a capability-recovery "
+            "one. (Corrected from an earlier version of this payload that appended '()' inside the "
+            "template to call __subclasses__ there -- that raises AttributeError even in a plain, "
+            "unsandboxed Python interpreter, since str.format has no call syntax; it never exercised "
+            "anything about RestrictedPython and would have been blocked for the wrong reason. A "
+            "second corrected attempt called the leaked value outside the template, which also fails -- "
+            ".format() always returns a str, never the live object -- confirming this technique is a "
+            "leak of the real environment's shape, not a route to the live object itself.)"
+        ),
     },
     {
         "id": "encoding_getattr_concatenation",
@@ -154,15 +167,20 @@ PAYLOADS: list[dict[str, str]] = [
         "id": "adaptive_getattr_string_concat",
         "technique": "subclasses_traversal",
         "source": "jailctf/pyjailbreaker (stringless / dynamic attribute resolution)",
-        "code": "attr_name = '__sub' + 'classes__'\ngetattr(object, attr_name)()",
-        "description": "Assemble target attribute name at runtime to evade compile-time AST attribute checks and call via getattr. (Known limitation: genuine static-analyzer blind spot with no literal dunder AST node; fails dynamically because getattr is absent from safe_globals, not because the analyzer caught anything equivalent).",
+        "code": (
+            "base_name = '__base' + '__'\n"
+            "attr_name = '__sub' + 'classes__'\n"
+            "object_type = getattr(int, base_name)\n"
+            "getattr(object_type, attr_name)()"
+        ),
+        "description": "Assemble target attribute names at runtime to evade compile-time AST attribute checks and call via getattr. Anchored on 'int' rather than 'object', since the bare name 'object' is not present in RestrictedPython's safe_builtins at all (only scalar/container type names like int/str/list are) -- a payload anchored on 'object' would fail with an unrelated NameError, testing the wrong thing. 'int.__base__' (itself fetched via getattr, never literal dot syntax) is 'object', so the second getattr() call reaches the full class graph, not just int's direct subclasses. (Known limitation: genuine static-analyzer blind spot with no literal dunder AST node; fails dynamically because getattr is absent from safe_globals, not because the analyzer caught anything equivalent).",
     },
     {
         "id": "adaptive_format_map_runtime_template",
         "technique": "format_string_attribute_access",
         "source": "jailctf/pyjailbreaker (jailbreak/gadgets/python/dict_getitem.py)",
-        "code": "key = 'v'\nf\"{{{key}.__class__}}\".format_map({key: object})",
-        "description": "Construct template dynamically at runtime with f-string to perform attribute lookup through format_map.",
+        "code": "key = 'v'\nf\"{{{key}.__class__}}\".format_map({key: int})",
+        "description": "Construct template dynamically at runtime with f-string to perform attribute lookup through format_map. Anchored on 'int' rather than 'object', which is not present in RestrictedPython's safe_builtins and would fail with an unrelated NameError.",
     },
 ]
 

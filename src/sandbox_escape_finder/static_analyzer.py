@@ -387,12 +387,57 @@ def detect_format_string_attribute_access(tree: ast.AST) -> list[Finding]:
     return findings
 
 
+def detect_dynamic_getattr(tree: ast.AST) -> list[Finding]:
+    """Flag getattr() calls where the attribute-name argument is not a string literal.
+
+    Heuristic / Taint-ish analysis:
+        Standard AST pattern matching looks for literal attribute accesses (e.g.
+        ``node.attr == '__subclasses__'``) or constant attribute lookups
+        (``getattr(x, '__subclasses__')``). Evasion techniques deliberately
+        circumvent this by computing dunder attribute names dynamically at runtime
+        (e.g. ``'__sub' + 'classes__'`` or referencing a variable).
+
+        This heuristic flags any ``getattr(target, attr_expr)`` invocation where
+        ``attr_expr`` is not a string literal (e.g., BinOp, Name, Call), catching
+        dynamic attribute assembly without requiring a full symbolic execution engine.
+    """
+    findings: list[Finding] = []
+
+    for node in ast.walk(tree):
+        lineno = getattr(node, "lineno", 1)
+        col_offset = getattr(node, "col_offset", 0)
+
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+        ):
+            attr_arg = node.args[1]
+            if not (isinstance(attr_arg, ast.Constant) and isinstance(attr_arg.value, str)):
+                findings.append(
+                    Finding(
+                        technique="dynamic_attribute_lookup",
+                        reason=(
+                            "Dynamic getattr() call with non-literal attribute argument "
+                            "(suspected runtime string construction or evasion)."
+                        ),
+                        node_location=(lineno, col_offset),
+                        confidence="LOW",
+                        node_type="Call",
+                    )
+                )
+
+    return findings
+
+
 DETECTOR_REGISTRY: dict[str, Callable[[ast.AST], list[Finding]]] = {
     "subclasses_traversal": detect_subclasses_traversal,
     "globals_access": detect_globals_access,
     "builtins_restoration": detect_builtins_restoration,
     "frame_introspection": detect_frame_introspection,
     "format_string_attribute_access": detect_format_string_attribute_access,
+    "dynamic_attribute_lookup": detect_dynamic_getattr,
 }
 
 
@@ -404,6 +449,8 @@ class StaticAnalyzer:
         self._enabled_detectors: list[str] = [
             tech for tech in self.config.enabled_techniques if tech in DETECTOR_REGISTRY
         ]
+        if self.config.heuristic_dynamic_getattr and "dynamic_attribute_lookup" not in self._enabled_detectors:
+            self._enabled_detectors.append("dynamic_attribute_lookup")
 
     @property
     def enabled_techniques(self) -> list[str]:

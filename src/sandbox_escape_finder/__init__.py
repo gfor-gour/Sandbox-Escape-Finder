@@ -1,5 +1,9 @@
 from sandbox_escape_finder.config import CANONICAL_TECHNIQUES, SandboxConfig, load_config
 from sandbox_escape_finder.dynamic_prober import DynamicProber, Payload, sandbox_exec
+from sandbox_escape_finder.misconfigured_sandboxes import (
+    sandbox_exec_exposed_getattr_builtin,
+    sandbox_exec_weak_getattr_hook,
+)
 from sandbox_escape_finder.oracle import CanaryState, EscapeOracle, OracleVerdict, oracle
 from sandbox_escape_finder.payloads import PAYLOADS, get_payload_corpus
 from sandbox_escape_finder.reporting import (
@@ -9,14 +13,17 @@ from sandbox_escape_finder.reporting import (
     to_markdown_summary,
     to_markdown_table,
 )
-from sandbox_escape_finder.static_analyzer import Finding, StaticAnalyzer
+from sandbox_escape_finder.static_analyzer import Finding, StaticAnalyzer, detect_dynamic_getattr
 
 __all__ = [
     "StaticAnalyzer",
     "Finding",
+    "detect_dynamic_getattr",
     "DynamicProber",
     "Payload",
     "sandbox_exec",
+    "sandbox_exec_weak_getattr_hook",
+    "sandbox_exec_exposed_getattr_builtin",
     "EscapeOracle",
     "CanaryState",
     "OracleVerdict",
