@@ -32,8 +32,10 @@ D — safer_getattr runtime guard
     ``_getattr_`` (the hook for every ``a.b`` attribute access compiled by
     RestrictedPython) is ``safer_getattr`` in the hardened config.
     ``safer_getattr`` additionally blocks ``str.format`` / ``str.format_map``
-    to prevent dunder-attribute access through format-string templates.
-    Wiring ``_getattr_`` to plain ``getattr`` removes that guard.
+    to prevent dunder-attribute access through format-string templates, and it
+    also re-checks ``INSPECT_ATTRIBUTES`` and the leading underscore at run time.
+    Wiring ``_getattr_`` to plain ``getattr`` removes all of those checks, so D
+    overlaps the run-time twins of layers A and B.
 
 Usage
 -----
@@ -71,8 +73,8 @@ _LAYER_LABELS: dict[str, str] = {
 # Full descriptions for the summary section
 _LAYER_DESCRIPTIONS: dict[str, str] = {
     "layer_a_disabled": (
-        "A — compile-time underscore rule disabled: "
-        "check_name and visit_Attribute no longer reject names/attrs starting with '_'"
+        "A — compile-time underscore rule disabled: check_name and visit_Attribute no longer "
+        "reject names/attrs starting with '_' (and safer_getattr's matching runtime check is dropped)"
     ),
     "layer_b_disabled": (
         "B — compile-time restricted names disabled: "
@@ -84,7 +86,8 @@ _LAYER_DESCRIPTIONS: dict[str, str] = {
     ),
     "layer_d_disabled": (
         "D — safer_getattr runtime guard disabled: "
-        "_getattr_ wired to plain getattr (format/format_map guard removed)"
+        "_getattr_ wired to plain getattr (all safer_getattr checks removed: format, Formatter, "
+        "INSPECT_ATTRIBUTES, underscore)"
     ),
 }
 

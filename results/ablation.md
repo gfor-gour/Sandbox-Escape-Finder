@@ -24,9 +24,9 @@
 | adaptive_format_map_runtime_template | format\_string\_attribute\_access | safe | safe | safe | safe | safe |
 
 ### Summary
-- **5** payload(s) are load-bearing *only* on A — compile-time underscore rule disabled: check_name and visit_Attribute no longer reject names/attrs starting with '_'
+- **5** payload(s) are load-bearing *only* on A — compile-time underscore rule disabled: check_name and visit_Attribute no longer reject names/attrs starting with '_' (and safer_getattr's matching runtime check is dropped)
 - **1** payload(s) are load-bearing *only* on B — compile-time restricted names disabled: INSPECT_ATTRIBUTES cleared (gi_frame, f_globals, f_back, cr_frame … unblocked)
 - **2** payload(s) are load-bearing *only* on C — safe_globals builtins disabled: full builtins module supplied instead of RestrictedPython's stripped dict
-- **0** payload(s) are load-bearing *only* on D — safer_getattr runtime guard disabled: _getattr_ wired to plain getattr (format/format_map guard removed)
+- **0** payload(s) are load-bearing *only* on D — safer_getattr runtime guard disabled: _getattr_ wired to plain getattr (all safer_getattr checks removed: format, Formatter, INSPECT_ATTRIBUTES, underscore)
 - **0** payload(s) require multiple layers to be disabled before escaping
 - **12** payload(s) do not escape under *any* single-layer ablation (blocked by the interaction of two or more layers, or structurally safe)

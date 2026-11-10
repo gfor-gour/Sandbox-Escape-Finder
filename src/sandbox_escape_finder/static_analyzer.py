@@ -1,4 +1,10 @@
-"""AST-based static analyzer for detecting sandbox escape constructs."""
+"""AST-based static analyzer for detecting sandbox escape constructs.
+
+`StaticAnalyzer.scan` parses the source, optionally runs
+`constant_folding.fold_constants` (default on) so computed strings such as
+`'__sub' + 'classes__'` become literals, then runs the literal detectors in
+`DETECTOR_REGISTRY` over the folded tree. It never executes the code.
+"""
 
 from __future__ import annotations
 
@@ -65,13 +71,14 @@ class Finding:
 def detect_subclasses_traversal(tree: ast.AST) -> list[Finding]:
     """Flag attempts to reach object hierarchy via __subclasses__ attribute or call.
 
-    Computed names:
-        This detector is purely literal. Names assembled at runtime (e.g.
-        ``getattr(int, '__sub' + 'classes__')``) are resolved *before* it runs by
-        ``constant_folding.fold_constants``, which rewrites statically
-        determinable string expressions into ``ast.Constant`` nodes. Only names
-        that are genuinely unknowable (``getattr(x, sys.argv[1])``) remain a
-        blind spot, covered by the optional LOW-confidence heuristic.
+    Known Limitation:
+        Only statically-resolvable strings are folded. ``getattr(int,
+        '__sub' + 'classes__')`` is flagged HIGH because
+        ``constant_folding.fold_constants`` rewrites it to a literal before this
+        detector runs. Genuinely dynamic names (``getattr(x, sys.argv[1])``)
+        remain a blind spot for this detector; they are covered only by the
+        optional LOW-confidence ``detect_dynamic_getattr`` heuristic
+        (``SandboxConfig(heuristic_dynamic_getattr=True)``, off by default).
     """
     findings: list[Finding] = []
 
@@ -407,16 +414,10 @@ def detect_format_string_attribute_access(tree: ast.AST) -> list[Finding]:
 def detect_dynamic_getattr(tree: ast.AST) -> list[Finding]:
     """Flag getattr() calls where the attribute-name argument is not a string literal.
 
-    Heuristic / Taint-ish analysis:
-        Standard AST pattern matching looks for literal attribute accesses (e.g.
-        ``node.attr == '__subclasses__'``) or constant attribute lookups
-        (``getattr(x, '__subclasses__')``). Evasion techniques deliberately
-        circumvent this by computing dunder attribute names dynamically at runtime
-        (e.g. ``'__sub' + 'classes__'`` or referencing a variable).
-
-        This heuristic flags any ``getattr(target, attr_expr)`` invocation where
-        ``attr_expr`` is not a string literal (e.g., BinOp, Name, Call), catching
-        dynamic attribute assembly without requiring a full symbolic execution engine.
+    Fallback heuristic, off by default (``SandboxConfig(heuristic_dynamic_getattr=True)``).
+    It runs after constant folding, so a ``getattr`` whose name folds to a string
+    literal is never reported here; only names that stay unresolved
+    (``getattr(x, sys.argv[1])``) produce a LOW finding.
     """
     findings: list[Finding] = []
 

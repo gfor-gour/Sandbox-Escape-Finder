@@ -1,79 +1,55 @@
-"""Realistic RestrictedPython misconfiguration variants (research extension).
+"""Misconfigured and ablated RestrictedPython sandboxes (Experiments 1-2 support code).
 
-`dynamic_prober.sandbox_exec` wires up RestrictedPython exactly as its own
-documentation and examples describe: `compile_restricted` plus every runtime
-guard from `safe_globals`/`RestrictedPython.Guards`. Running the full 20-payload
-corpus (see `payloads.py`) against that hardened configuration produces zero
-escapes -- see README.md, "Experiment 1". That is a correct and expected
-result, not a null result: it says RestrictedPython 8.5, used as documented,
-withstands this corpus.
+`dynamic_prober.sandbox_exec` wires RestrictedPython 8.5 exactly as its own
+documentation describes (`compile_restricted` + the full `safe_globals` guard
+set). The 20-payload corpus (`payloads.py`) produces zero escapes against it;
+see `results/experiment1.md`.
 
-RestrictedPython's own README is explicit that it is a compiler, not a
-complete sandbox: it restricts *syntax*, and the integrator is responsible for
-supplying a correctly-guarded runtime environment. The two sandbox_exec
-variants below each reproduce one specific, narrow, commonly-made integration
-mistake -- the kind that shows up in tutorials, Stack Overflow answers, and
-real issue trackers for projects embedding RestrictedPython -- and change
-*nothing else*. Each is a one-line diff from the hardened `_WORKER_SCRIPT` in
-`dynamic_prober.py`. Running the same corpus, same oracle, and same static
-analyzer against them is "Experiment 2": it demonstrates that the toolbox's
-dynamic prober and oracle can and do detect real escapes once the one
-realistic variable that RestrictedPython explicitly leaves to the integrator
-is weakened, without ever touching RestrictedPython's own compiler code.
+This module holds the variants used to locate the boundary of that result.
+Every variant is a worker script derived from the hardened `_WORKER_SCRIPT`
+and run through `dynamic_prober._run_worker_script` (same subprocess isolation,
+disposable work dir, and timeout). The RestrictedPython files on disk are never
+modified. Variants 1, 2 and ablations C and D change only the globals the
+integrator passes to `exec()`. Ablations A and B additionally monkey-patch
+`RestrictedPython.transformer` / `RestrictedPython.Guards` in the worker
+process's memory.
 
-Both variants share `dynamic_prober._run_worker_script` for subprocess
-isolation, disposable work directories, and the hard timeout -- only the
-in-subprocess worker script (i.e. which RestrictedPython globals get wired up)
-differs from the hardened baseline.
+Realistic integration mistakes (results/experiment2.md)
+-------------------------------------------------------
+Variant 1 `sandbox_exec_weak_getattr_hook`: `_getattr_` = plain `getattr`
+    instead of `Guards.safer_getattr`. Reopens `str.format` / `format_map`
+    attribute traversal, which can only stringify an attribute chain
+    (information disclosure); the canary oracle does not score that.
+Variant 2 `sandbox_exec_exposed_getattr_builtin`: the `getattr` builtin is added
+    to the sandbox globals. Payloads that build a dunder name at runtime
+    (`getattr(int, '__base__')`) now run and can reach the real `open()`.
 
-Variant 1 -- weak `_getattr_` hook
------------------------------------
-RestrictedPython's AST transform rewrites every `a.b` access in compiled code
-into a call to whatever the globals provide as `_getattr_`. Dunder attribute
-*names* (`a.__class__`) are rejected by the compiler itself regardless of
-`_getattr_`, so this variant does not reopen those. But non-underscore
-attribute names -- notably `.format` / `.format_map` on a string -- compile
-and reach `_getattr_` at runtime. The hardened config points `_getattr_` at
-`RestrictedPython.Guards.safer_getattr`, which has a specific check that
-raises `NotImplementedError` for string-formatting methods precisely because
-`.format()`/`.format_map()` can be used to reach dunder attributes through a
-template string. If an integrator instead wires `_getattr_` to the plain
-builtin `getattr` -- e.g. while debugging an unrelated `NameError` on
-`_getattr_`, or copying an incomplete snippet -- that specific check disappears
-and format-string attribute traversal (`'{0.__class__}'.format(...)`,
-`format_map`) works again.
+Defense-layer ablation (results/ablation.md)
+--------------------------------------------
+Four variants, one per layer, each run against the same 20 payloads:
 
-Variant 2 -- `getattr` exposed as a plain global
---------------------------------------------------
-`safe_globals` deliberately omits the `getattr` builtin itself (distinct from
-the `_getattr_` guard hook above, which only fires for `a.b` syntax).
-Explicit `getattr(x, name)` *calls* are ordinary function calls; RestrictedPython's
-compiler has no reason to touch them, so whether they work depends entirely on
-whether `getattr` is present in the globals dict as a callable. If an
-integrator adds `getattr` back for convenience (a frequent "fix" for user
-code that legitimately needs dynamic attribute lookup), every static-analysis
-blind spot that relies on constructing a dunder attribute name at runtime
-(e.g. `getattr(object, '__sub' + 'classes__')`) becomes reachable, because
-plain `getattr` enforces no underscore policy at all.
+  A  `sandbox_exec_layer_a_disabled`: `check_name` and `visit_Attribute` stop
+     rejecting `_`-prefixed names (transformer.py), AND `_getattr_` is replaced
+     by a copy of `safer_getattr` without its `startswith('_')` check
+     (Guards.py), because with only the compile-time check removed the runtime
+     check blocks every payload anyway.
+  B  `sandbox_exec_layer_b_disabled`: `INSPECT_ATTRIBUTES` is set to an empty
+     set in both `transformer` (compile time) and `Guards` (read by
+     `safer_getattr` at run time).
+  C  `sandbox_exec_layer_c_disabled`: `__builtins__` is the real `builtins`
+     module instead of `safe_globals`' stripped dict.
+  D  `sandbox_exec_layer_d_disabled`: `_getattr_` = plain `getattr`; identical
+     to Variant 1. This removes every check inside `safer_getattr` (format,
+     `string.Formatter`, `INSPECT_ATTRIBUTES`, underscore), not only the
+     format guard.
 
-Defense-Ablation Matrix (Experiment 3)
----------------------------------------
-Extends beyond two ad-hoc variants to a *systematic* ablation across all four
-named defense layers:
-
-  A — compile-time underscore rule   (`RestrictingNodeTransformer.check_name` +
-                                       `visit_Attribute` underscore checks)
-  B — compile-time restricted names  (`INSPECT_ATTRIBUTES` set in transformer
-                                       and runtime guard)
-  C — safe_globals builtins          (integrator supplies full `builtins` dict
-                                       instead of RestrictedPython's stripped set)
-  D — safer_getattr runtime guard    (Variant 1 above: `_getattr_` = plain `getattr`)
-
-Each ablation disables exactly one layer and leaves the other three intact.
-Running the same 20 payloads through each ablation, then reading which payloads
-"flip" from safe to ESCAPES, shows which layer is the *load-bearing* defense
-for each payload class. See `ablation_matrix.py` for the runner and table
-generation, and `run_ablation_study.py` for the executable entrypoint.
+The layers are therefore not orthogonal: A and B each remove a compile-time
+check plus its run-time twin in `safer_getattr`, and D removes all run-time
+twins at once. A payload reported as load-bearing "only on A" means no single
+other ablation lets it escape; it does not mean the run-time twin is
+irrelevant. An ablation counts a payload as escaped only when the canary oracle
+or `capability_recovered` fires, so information-disclosure-only leaks (the
+Variant 1 / D gadget) count as safe.
 """
 
 from __future__ import annotations

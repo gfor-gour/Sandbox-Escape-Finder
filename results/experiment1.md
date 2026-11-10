@@ -4,26 +4,26 @@
 
 | payload_id | technique | static_flagged | static_confidence | dynamic_executed | dynamic_escaped | capability_recovered | blocking_mechanism | timing (s) | category |
 |---|---|---|---|---|---|---|---|---|---|
-| subclasses_tuple_base | subclasses_traversal | True | HIGH | False | False | False | Compile-time (underscore rule) | 0.1863 | False positive |
-| subclasses_mro_catch_warnings | subclasses_traversal | True | HIGH | False | False | False | Compile-time (underscore rule) | 0.1668 | False positive |
-| subclasses_int_hierarchy | subclasses_traversal | True | HIGH | False | False | False | Compile-time (underscore rule) | 0.173 | False positive |
-| globals_lambda_builtins | globals_access | True | HIGH | False | False | False | Compile-time (underscore rule) | 0.1691 | False positive |
-| globals_closure_leak | globals_access | True | HIGH | False | False | False | Compile-time (underscore rule) | 0.1669 | False positive |
-| globals_func_globals_alias | globals_access | True | HIGH | True | False | False | Contained (safe execution) | 0.1814 | False positive |
-| builtins_direct_canary_write | builtins_restoration | True | MEDIUM | False | False | False | Compile-time (underscore rule) | 0.2464 | False positive |
-| builtins_loader_recovery | builtins_restoration | True | HIGH | False | False | False | Compile-time (underscore rule) | 0.2002 | False positive |
-| frame_generator_inspection | frame_introspection | True | HIGH | False | False | False | Compile-time (restricted name check) | 0.1929 | False positive |
-| frame_coroutine_inspection | frame_introspection | True | HIGH | False | False | False | Compile-time (restricted name check) | 0.213 | False positive |
-| encoding_format_string_introspection | format_string_attribute_access | True | HIGH | False | False | False | Runtime guard (safer_getattr) | 0.1816 | False positive |
-| encoding_getattr_concatenation | encoding_obfuscation | True | HIGH | False | False | False | Runtime (safe_globals stripped builtin) | 0.1546 | False positive |
-| builtins_wrap_close_globals | builtins_restoration | True | HIGH | False | False | False | Compile-time (underscore rule) | 0.1678 | False positive |
-| builtins_chr_self | builtins_restoration | False | - | False | False | False | Compile-time (underscore rule) | 0.1929 | True negative |
-| builtins_os_builtins_import | builtins_restoration | True | HIGH | False | False | False | Compile-time (underscore rule) | 0.2056 | False positive |
-| frame_gi_frame_f_builtins | frame_introspection | True | HIGH | False | False | False | Compile-time (restricted name check) | 0.1753 | False positive |
-| format_map_attrerror_leak | format_string_attribute_access | False | - | True | False | False | Contained (safe execution) | 0.1854 | True negative |
-| adaptive_traceback_frame_walk | frame_introspection | True | HIGH | False | False | False | Compile-time (restricted name check) | 0.1645 | False positive |
-| adaptive_getattr_string_concat | subclasses_traversal | True | HIGH | False | False | False | Runtime (safe_globals stripped builtin) | 0.1858 | False positive |
-| adaptive_format_map_runtime_template | format_string_attribute_access | True | HIGH | False | False | False | Runtime guard (safer_getattr) | 0.1936 | False positive |
+| subclasses_tuple_base | subclasses_traversal | True | HIGH | False | False | False | Compile-time (underscore rule) | 0.2365 | False positive |
+| subclasses_mro_catch_warnings | subclasses_traversal | True | HIGH | False | False | False | Compile-time (underscore rule) | 0.1891 | False positive |
+| subclasses_int_hierarchy | subclasses_traversal | True | HIGH | False | False | False | Compile-time (underscore rule) | 0.1996 | False positive |
+| globals_lambda_builtins | globals_access | True | HIGH | False | False | False | Compile-time (underscore rule) | 0.2103 | False positive |
+| globals_closure_leak | globals_access | True | HIGH | False | False | False | Compile-time (underscore rule) | 0.2677 | False positive |
+| globals_func_globals_alias | globals_access | True | HIGH | True | False | False | Contained (safe execution) | 0.2709 | False positive |
+| builtins_direct_canary_write | builtins_restoration | True | MEDIUM | False | False | False | Compile-time (underscore rule) | 0.2103 | False positive |
+| builtins_loader_recovery | builtins_restoration | True | HIGH | False | False | False | Compile-time (underscore rule) | 0.1901 | False positive |
+| frame_generator_inspection | frame_introspection | True | HIGH | False | False | False | Compile-time (restricted name check) | 0.1853 | False positive |
+| frame_coroutine_inspection | frame_introspection | True | HIGH | False | False | False | Compile-time (restricted name check) | 0.1687 | False positive |
+| encoding_format_string_introspection | format_string_attribute_access | True | HIGH | False | False | False | Runtime guard (safer_getattr) | 0.1666 | False positive |
+| encoding_getattr_concatenation | encoding_obfuscation | True | HIGH | False | False | False | Runtime (safe_globals stripped builtin) | 0.1847 | False positive |
+| builtins_wrap_close_globals | builtins_restoration | True | HIGH | False | False | False | Compile-time (underscore rule) | 0.1622 | False positive |
+| builtins_chr_self | builtins_restoration | False | - | False | False | False | Compile-time (underscore rule) | 0.1631 | True negative |
+| builtins_os_builtins_import | builtins_restoration | True | HIGH | False | False | False | Compile-time (underscore rule) | 0.2021 | False positive |
+| frame_gi_frame_f_builtins | frame_introspection | True | HIGH | False | False | False | Compile-time (restricted name check) | 0.182 | False positive |
+| format_map_attrerror_leak | format_string_attribute_access | False | - | True | False | False | Contained (safe execution) | 0.1891 | True negative |
+| adaptive_traceback_frame_walk | frame_introspection | True | HIGH | False | False | False | Compile-time (restricted name check) | 0.1777 | False positive |
+| adaptive_getattr_string_concat | subclasses_traversal | True | HIGH | False | False | False | Runtime (safe_globals stripped builtin) | 0.222 | False positive |
+| adaptive_format_map_runtime_template | format_string_attribute_access | True | HIGH | False | False | False | Runtime guard (safer_getattr) | 0.1834 | False positive |
 
 | Category | Definition | Count | Payloads |
 |---|---|---|---|
