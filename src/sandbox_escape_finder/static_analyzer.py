@@ -7,6 +7,7 @@ import string
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
+from sandbox_escape_finder.constant_folding import fold_constants
 from sandbox_escape_finder.config import CANONICAL_TECHNIQUES, SandboxConfig, load_config
 
 
@@ -64,14 +65,13 @@ class Finding:
 def detect_subclasses_traversal(tree: ast.AST) -> list[Finding]:
     """Flag attempts to reach object hierarchy via __subclasses__ attribute or call.
 
-    Known Limitation:
-        Dynamic attribute resolution (e.g. ``adaptive_getattr_string_concat``,
-        where ``'__sub' + 'classes__'`` is concatenated at runtime and accessed
-        via ``getattr``) is a genuine static-analyzer blind spot because no
-        literal dunder AST node exists in the syntax tree. When such a payload
-        fails in the sandbox, it fails for an unrelated environmental reason
-        (``getattr`` absent from ``safe_globals``), NOT because the static
-        analyzer caught anything equivalent.
+    Computed names:
+        This detector is purely literal. Names assembled at runtime (e.g.
+        ``getattr(int, '__sub' + 'classes__')``) are resolved *before* it runs by
+        ``constant_folding.fold_constants``, which rewrites statically
+        determinable string expressions into ``ast.Constant`` nodes. Only names
+        that are genuinely unknowable (``getattr(x, sys.argv[1])``) remain a
+        blind spot, covered by the optional LOW-confidence heuristic.
     """
     findings: list[Finding] = []
 
@@ -356,13 +356,30 @@ def detect_format_string_attribute_access(tree: ast.AST) -> list[Finding]:
     """
     findings: list[Finding] = []
 
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
-            continue
-        if node.func.attr not in {"format", "format_map", "vformat"}:
-            continue
+    format_methods = {"format", "format_map", "vformat"}
 
-        receiver = node.func.value
+    def format_receiver(call: ast.Call) -> ast.expr | None:
+        """Receiver of ``X.format(...)`` or of the evasive ``getattr(X, 'format')(...)``."""
+        func = call.func
+        if isinstance(func, ast.Attribute) and func.attr in format_methods:
+            return func.value
+        if (
+            isinstance(func, ast.Call)
+            and isinstance(func.func, ast.Name)
+            and func.func.id == "getattr"
+            and len(func.args) >= 2
+            and isinstance(func.args[1], ast.Constant)
+            and func.args[1].value in format_methods
+        ):
+            return func.args[0]
+        return None
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        receiver = format_receiver(node)
+        if receiver is None:
+            continue
         template: str | None = None
         if isinstance(receiver, ast.Constant) and isinstance(receiver.value, str):
             template = receiver.value  # "...".format(...)
@@ -462,6 +479,10 @@ class StaticAnalyzer:
             tree = ast.parse(source_code)
         except SyntaxError:
             return []
+
+        if self.config.constant_folding:
+            # Resolve computed strings first so the unchanged literal detectors see them.
+            tree = fold_constants(tree)
 
         findings: list[Finding] = []
         for tech in self._enabled_detectors:

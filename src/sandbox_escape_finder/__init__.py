@@ -1,7 +1,13 @@
 from sandbox_escape_finder.config import CANONICAL_TECHNIQUES, SandboxConfig, load_config
 from sandbox_escape_finder.dynamic_prober import DynamicProber, Payload, sandbox_exec
 from sandbox_escape_finder.misconfigured_sandboxes import (
+    ABLATION_LAYER_VARIANTS,
+    MISCONFIGURED_VARIANTS,
     sandbox_exec_exposed_getattr_builtin,
+    sandbox_exec_layer_a_disabled,
+    sandbox_exec_layer_b_disabled,
+    sandbox_exec_layer_c_disabled,
+    sandbox_exec_layer_d_disabled,
     sandbox_exec_weak_getattr_hook,
 )
 from sandbox_escape_finder.oracle import CanaryState, EscapeOracle, OracleVerdict, oracle
@@ -24,6 +30,12 @@ __all__ = [
     "sandbox_exec",
     "sandbox_exec_weak_getattr_hook",
     "sandbox_exec_exposed_getattr_builtin",
+    "sandbox_exec_layer_a_disabled",
+    "sandbox_exec_layer_b_disabled",
+    "sandbox_exec_layer_c_disabled",
+    "sandbox_exec_layer_d_disabled",
+    "MISCONFIGURED_VARIANTS",
+    "ABLATION_LAYER_VARIANTS",
     "EscapeOracle",
     "CanaryState",
     "OracleVerdict",
