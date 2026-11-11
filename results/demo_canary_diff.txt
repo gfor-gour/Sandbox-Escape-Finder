@@ -1,0 +1,9 @@
+oracle_escape_verdict: True
+config: exposed_getattr_builtin
+
+--- canary (before)
++++ canary (after)
+@@ -1 +1 @@
+-ESCAPE_CONFIRMED_CANARY_SECRET_TOKEN
++PWNED_VIA_EXPOSED_GETATTR
+

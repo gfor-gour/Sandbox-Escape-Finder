@@ -296,3 +296,61 @@ y = (lambda: None).__globals__
         broken_code = "def invalid_syntax(:"
         analyzer = StaticAnalyzer()
         assert analyzer.scan(broken_code) == []
+
+
+class TestDynamicGetattrHeuristic:
+    """Tests for the taint-ish heuristic detecting non-literal getattr() invocations."""
+
+    def test_flags_concatenated_string_getattr(self) -> None:
+        """getattr(obj, '__sub' + 'classes__') passes a BinOp (not a string literal)."""
+        code = "getattr(object, '__sub' + 'classes__')()"
+        # constant_folding=False reproduces the pre-upgrade literal-only analyzer.
+        analyzer = StaticAnalyzer(config=SandboxConfig(heuristic_dynamic_getattr=True, constant_folding=False))
+        findings = analyzer.scan(code)
+
+        assert len(findings) == 1
+        assert findings[0]["technique"] == "dynamic_attribute_lookup"
+        assert findings[0]["confidence"] == "LOW"
+        assert "non-literal" in findings[0]["reason"]
+
+    def test_flags_variable_name_getattr(self) -> None:
+        """getattr(int, base_name) passes a Name node (variable), not a string literal."""
+        code = "import sys\nbase_name = sys.argv[1]\ngetattr(int, base_name)"
+        analyzer = StaticAnalyzer(config=SandboxConfig(heuristic_dynamic_getattr=True))
+        findings = analyzer.scan(code)
+
+        assert len(findings) == 1
+        assert findings[0]["technique"] == "dynamic_attribute_lookup"
+        assert findings[0]["confidence"] == "LOW"
+
+    def test_ignores_literal_string_getattr(self) -> None:
+        """Benign getattr(obj, 'attribute_name') has a string literal and should not be flagged."""
+        code = "name = getattr(user, 'username', 'anonymous')"
+        analyzer = StaticAnalyzer(config=SandboxConfig(heuristic_dynamic_getattr=True))
+        findings = analyzer.scan(code)
+
+        assert findings == []
+
+    def test_adaptive_getattr_string_concat_payload_blind_spot_and_closure(self) -> None:
+        """Literal-only analyzer misses the payload; constant folding closes it at HIGH."""
+        from sandbox_escape_finder.payloads import PAYLOADS
+        payload = next(p for p in PAYLOADS if p["id"] == "adaptive_getattr_string_concat")
+
+        literal_only = StaticAnalyzer(config=SandboxConfig(constant_folding=False))
+        assert literal_only.scan(payload["code"]) == []
+
+        # Heuristic fallback (legacy): LOW-confidence flags on both getattr calls.
+        heuristic = StaticAnalyzer(config=SandboxConfig(heuristic_dynamic_getattr=True, constant_folding=False))
+        findings = heuristic.scan(payload["code"])
+        assert len(findings) == 2
+        assert all(f["technique"] == "dynamic_attribute_lookup" for f in findings)
+
+        # Default analyzer: same detector as the literal case, HIGH confidence, no heuristic.
+        folded = StaticAnalyzer().scan(payload["code"])
+        assert [(f["technique"], f["confidence"]) for f in folded] == [("subclasses_traversal", "HIGH")]
+
+    def test_folding_removes_heuristic_false_positive(self) -> None:
+        """A resolvable benign name is no longer a LOW finding; an unknowable one still is."""
+        analyzer = StaticAnalyzer(config=SandboxConfig(heuristic_dynamic_getattr=True))
+        assert analyzer.scan("n = 'user' + 'name'\ngetattr(obj, n)") == []
+        assert len(analyzer.scan("import sys\ngetattr(obj, sys.argv[1])")) == 1

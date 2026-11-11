@@ -1,4 +1,10 @@
-"""AST-based static analyzer for detecting sandbox escape constructs."""
+"""AST-based static analyzer for detecting sandbox escape constructs.
+
+`StaticAnalyzer.scan` parses the source, optionally runs
+`constant_folding.fold_constants` (default on) so computed strings such as
+`'__sub' + 'classes__'` become literals, then runs the literal detectors in
+`DETECTOR_REGISTRY` over the folded tree. It never executes the code.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +13,7 @@ import string
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
+from sandbox_escape_finder.constant_folding import fold_constants
 from sandbox_escape_finder.config import CANONICAL_TECHNIQUES, SandboxConfig, load_config
 
 
@@ -65,13 +72,13 @@ def detect_subclasses_traversal(tree: ast.AST) -> list[Finding]:
     """Flag attempts to reach object hierarchy via __subclasses__ attribute or call.
 
     Known Limitation:
-        Dynamic attribute resolution (e.g. ``adaptive_getattr_string_concat``,
-        where ``'__sub' + 'classes__'`` is concatenated at runtime and accessed
-        via ``getattr``) is a genuine static-analyzer blind spot because no
-        literal dunder AST node exists in the syntax tree. When such a payload
-        fails in the sandbox, it fails for an unrelated environmental reason
-        (``getattr`` absent from ``safe_globals``), NOT because the static
-        analyzer caught anything equivalent.
+        Only statically-resolvable strings are folded. ``getattr(int,
+        '__sub' + 'classes__')`` is flagged HIGH because
+        ``constant_folding.fold_constants`` rewrites it to a literal before this
+        detector runs. Genuinely dynamic names (``getattr(x, sys.argv[1])``)
+        remain a blind spot for this detector; they are covered only by the
+        optional LOW-confidence ``detect_dynamic_getattr`` heuristic
+        (``SandboxConfig(heuristic_dynamic_getattr=True)``, off by default).
     """
     findings: list[Finding] = []
 
@@ -356,13 +363,30 @@ def detect_format_string_attribute_access(tree: ast.AST) -> list[Finding]:
     """
     findings: list[Finding] = []
 
-    for node in ast.walk(tree):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
-            continue
-        if node.func.attr not in {"format", "format_map", "vformat"}:
-            continue
+    format_methods = {"format", "format_map", "vformat"}
 
-        receiver = node.func.value
+    def format_receiver(call: ast.Call) -> ast.expr | None:
+        """Receiver of ``X.format(...)`` or of the evasive ``getattr(X, 'format')(...)``."""
+        func = call.func
+        if isinstance(func, ast.Attribute) and func.attr in format_methods:
+            return func.value
+        if (
+            isinstance(func, ast.Call)
+            and isinstance(func.func, ast.Name)
+            and func.func.id == "getattr"
+            and len(func.args) >= 2
+            and isinstance(func.args[1], ast.Constant)
+            and func.args[1].value in format_methods
+        ):
+            return func.args[0]
+        return None
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        receiver = format_receiver(node)
+        if receiver is None:
+            continue
         template: str | None = None
         if isinstance(receiver, ast.Constant) and isinstance(receiver.value, str):
             template = receiver.value  # "...".format(...)
@@ -387,12 +411,51 @@ def detect_format_string_attribute_access(tree: ast.AST) -> list[Finding]:
     return findings
 
 
+def detect_dynamic_getattr(tree: ast.AST) -> list[Finding]:
+    """Flag getattr() calls where the attribute-name argument is not a string literal.
+
+    Fallback heuristic, off by default (``SandboxConfig(heuristic_dynamic_getattr=True)``).
+    It runs after constant folding, so a ``getattr`` whose name folds to a string
+    literal is never reported here; only names that stay unresolved
+    (``getattr(x, sys.argv[1])``) produce a LOW finding.
+    """
+    findings: list[Finding] = []
+
+    for node in ast.walk(tree):
+        lineno = getattr(node, "lineno", 1)
+        col_offset = getattr(node, "col_offset", 0)
+
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+        ):
+            attr_arg = node.args[1]
+            if not (isinstance(attr_arg, ast.Constant) and isinstance(attr_arg.value, str)):
+                findings.append(
+                    Finding(
+                        technique="dynamic_attribute_lookup",
+                        reason=(
+                            "Dynamic getattr() call with non-literal attribute argument "
+                            "(suspected runtime string construction or evasion)."
+                        ),
+                        node_location=(lineno, col_offset),
+                        confidence="LOW",
+                        node_type="Call",
+                    )
+                )
+
+    return findings
+
+
 DETECTOR_REGISTRY: dict[str, Callable[[ast.AST], list[Finding]]] = {
     "subclasses_traversal": detect_subclasses_traversal,
     "globals_access": detect_globals_access,
     "builtins_restoration": detect_builtins_restoration,
     "frame_introspection": detect_frame_introspection,
     "format_string_attribute_access": detect_format_string_attribute_access,
+    "dynamic_attribute_lookup": detect_dynamic_getattr,
 }
 
 
@@ -404,6 +467,8 @@ class StaticAnalyzer:
         self._enabled_detectors: list[str] = [
             tech for tech in self.config.enabled_techniques if tech in DETECTOR_REGISTRY
         ]
+        if self.config.heuristic_dynamic_getattr and "dynamic_attribute_lookup" not in self._enabled_detectors:
+            self._enabled_detectors.append("dynamic_attribute_lookup")
 
     @property
     def enabled_techniques(self) -> list[str]:
@@ -415,6 +480,13 @@ class StaticAnalyzer:
             tree = ast.parse(source_code)
         except SyntaxError:
             return []
+
+        if self.config.constant_folding:
+            # Resolve computed strings first so the unchanged literal detectors see them.
+            try:
+                tree = fold_constants(tree)
+            except RecursionError:
+                pass  # keep the unfolded tree rather than crash the scan
 
         findings: list[Finding] = []
         for tech in self._enabled_detectors:
