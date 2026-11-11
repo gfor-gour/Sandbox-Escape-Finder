@@ -49,10 +49,39 @@ from __future__ import annotations
 
 import ast
 import copy
+import re
+from contextvars import ContextVar
 from typing import Any
 
 _MAX_LEN = 100_000
 _MAX_ITEMS = 10_000
+
+# Names bound anywhere in the tree being folded (def/class/import/assign/param).
+# A builtin named here may be user-defined, so it is never evaluated as the builtin.
+_BOUND_NAMES: ContextVar[frozenset[str]] = ContextVar("_BOUND_NAMES", default=frozenset())
+# Format widths/precisions of 6+ digits (or `*`) could allocate huge strings before
+# the _MAX_LEN check runs, so such formatting is left unfolded.
+_HUGE_FORMAT = re.compile(r"\d{6,}|\*")
+
+
+def _shadowed(name: str, env: dict[str, Any]) -> bool:
+    return name in env or name in _BOUND_NAMES.get()
+
+
+def _collect_bound_names(tree: ast.AST) -> frozenset[str]:
+    names: set[str] = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Name) and isinstance(n.ctx, (ast.Store, ast.Del)):
+            names.add(n.id)
+        elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(n.name)
+        elif isinstance(n, ast.arg):
+            names.add(n.arg)
+        elif isinstance(n, ast.alias):
+            names.add((n.asname or n.name).split(".")[0])
+        elif isinstance(n, ast.ExceptHandler) and n.name:
+            names.add(n.name)
+    return frozenset(names)
 
 
 class _Unknown:
@@ -154,7 +183,7 @@ def _eval(node: ast.AST | None, env: dict[str, Any]) -> Any:  # noqa: C901 - one
                 spec = ""
                 if part.format_spec is not None:
                     spec = _eval(part.format_spec, env)
-                    if not isinstance(spec, str):
+                    if not isinstance(spec, str) or _HUGE_FORMAT.search(spec):
                         return UNKNOWN
                 parts.append(format(v, spec))
             else:
@@ -208,6 +237,8 @@ def _eval_binop(node: ast.BinOp, env: dict[str, Any]) -> Any:
             return seq * n
         return UNKNOWN
     if isinstance(op, ast.Mod) and isinstance(left, str):
+        if _HUGE_FORMAT.search(left):
+            return UNKNOWN
         return left % right
     return UNKNOWN
 
@@ -251,12 +282,12 @@ def _eval_call(node: ast.Call, env: dict[str, Any]) -> Any:  # noqa: C901
 
     if isinstance(func, ast.Name):
         name = func.id
-        if name in env:  # shadowed builtin
+        if _shadowed(name, env):  # shadowed builtin
             return UNKNOWN
         if name == "map" and len(node.args) == 2 and isinstance(node.args[0], ast.Name):
             fn = {"chr": chr, "str": str, "ord": ord, "int": int}.get(node.args[0].id)
             items = _iterable(_eval(node.args[1], env))
-            if fn is None or items is None or node.args[0].id in env:
+            if fn is None or items is None or _shadowed(node.args[0].id, env):
                 return UNKNOWN
             return [fn(i) for i in items]
         args = _eval_all(node.args, env)
@@ -294,7 +325,7 @@ def _eval_call(node: ast.Call, env: dict[str, Any]) -> Any:  # noqa: C901
     if isinstance(func, ast.Attribute):
         method = func.attr
         # bytes.fromhex('...')  /  str.join(sep, it)
-        if isinstance(func.value, ast.Name) and func.value.id in {"bytes", "str"} and func.value.id not in env:
+        if isinstance(func.value, ast.Name) and func.value.id in {"bytes", "str"} and not _shadowed(func.value.id, env):
             args = _eval_all(node.args, env)
             if args is None:
                 return UNKNOWN
@@ -564,5 +595,11 @@ class _Folder(ast.NodeTransformer):
 def fold_constants(tree: ast.AST) -> ast.AST:
     """Return a constant-folded *copy* of ``tree`` (the input is not modified)."""
     folder = _Folder()
-    folded = folder.visit(copy.deepcopy(tree))
+    token = _BOUND_NAMES.set(_collect_bound_names(tree))
+    try:
+        folded = folder.visit(copy.deepcopy(tree))
+    except (RecursionError, MemoryError):
+        return tree  # fold is best-effort: fall back to the unfolded tree
+    finally:
+        _BOUND_NAMES.reset(token)
     return ast.fix_missing_locations(folded)

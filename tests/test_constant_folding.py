@@ -78,3 +78,22 @@ def test_input_tree_not_mutated() -> None:
     before = ast.dump(tree)
     fold_constants(tree)
     assert ast.dump(tree) == before
+
+
+def test_shadowed_builtin_is_not_folded():
+    from sandbox_escape_finder.constant_folding import fold_constants
+    import ast
+    src = "def chr(x): return 'Z'\ny = chr(65)\n"
+    out = ast.unparse(fold_constants(ast.parse(src)))
+    assert "chr(65)" in out and "'A'" not in out
+
+
+def test_huge_format_width_is_not_evaluated():
+    from sandbox_escape_finder import StaticAnalyzer
+    assert StaticAnalyzer().scan("getattr(x, '%1000000000s' % 'a')") == []
+
+
+def test_deeply_nested_source_does_not_crash_scan():
+    from sandbox_escape_finder import StaticAnalyzer
+    src = "x = " + "+".join(["y"] * 1500) + "\nx.__subclasses__()\n"
+    assert StaticAnalyzer().scan(src)

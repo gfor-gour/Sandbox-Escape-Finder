@@ -483,7 +483,10 @@ class StaticAnalyzer:
 
         if self.config.constant_folding:
             # Resolve computed strings first so the unchanged literal detectors see them.
-            tree = fold_constants(tree)
+            try:
+                tree = fold_constants(tree)
+            except RecursionError:
+                pass  # keep the unfolded tree rather than crash the scan
 
         findings: list[Finding] = []
         for tech in self._enabled_detectors:
